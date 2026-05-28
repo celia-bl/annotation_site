@@ -20,17 +20,17 @@ export default function ProjectList({ onSelectProject, onCreateProject }) {
     return (
         <div style={s.container}>
             <div style={s.header}>
-                <h1 style={s.title}>🐠 Mes projets</h1>
+                <h1 style={s.title}>🐠 Projects</h1>
                 <button style={s.newBtn} onClick={onCreateProject}>
-                    + Nouveau projet
+                    + New Project
                 </button>
             </div>
 
             {projects.length === 0 && (
                 <div style={s.empty}>
-                    Aucun projet pour l'instant.<br />
+                    Empty project list.<br />
                     <span style={{ color: "#2563eb", cursor: "pointer" }} onClick={onCreateProject}>
-                        Créer votre premier projet →
+                        Create first project →
                     </span>
                 </div>
             )}
@@ -52,10 +52,10 @@ export default function ProjectList({ onSelectProject, onCreateProject }) {
                         </div>
                         <div style={s.cardFooter}>
                             <button style={s.startBtn} onClick={() => onSelectProject(p)}>
-                                🚀 Ouvrir
+                                🚀 Go
                             </button>
                             <button style={s.deleteBtn} onClick={() => deleteProject(p.name)}>
-                                🗑 Supprimer
+                                🗑 Delete
                             </button>
                         </div>
                     </div>
