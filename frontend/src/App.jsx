@@ -9,6 +9,8 @@ export default function App() {
     const { step, setStep, view, setView, setSelectedProject, selectedProject } = useAppContext();
 
     if (step === 3) return <Annotation />;
+    if (step === 2) return <Config />;
+
     if (view === "create") return <CreateProject onBack={() => setView("list")} onCreated={(p) => { setSelectedProject(p); setView("setup"); }} />;
     if (view === "setup") return <Setup project={selectedProject} onBack={() => setView("list")} />;
 

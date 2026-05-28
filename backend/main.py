@@ -474,6 +474,7 @@ PROJECTS_FILE = Path("projects.json")
 def load_projects():
     if not PROJECTS_FILE.exists():
         return []
+    print("tututu", json.loads(PROJECTS_FILE.read_text()))
     return json.loads(PROJECTS_FILE.read_text())
 
 def save_projects(projects):
@@ -997,11 +998,4 @@ def create_project(body: dict):
     projects_file.write_text(json.dumps(projects, indent=2))
     return {"ok": True, "project": project}
 
-
-@app.get("/projects")
-def list_projects():
-    projects_file = Path("projects.json")
-    if not projects_file.exists():
-        return {"projects": []}
-    return {"projects": json.loads(projects_file.read_text())}
 

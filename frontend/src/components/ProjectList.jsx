@@ -8,7 +8,7 @@ export default function ProjectList({ onSelectProject, onCreateProject }) {
     useEffect(() => {
         fetch(`${API}/projects`)
             .then(r => r.json())
-            .then(data => setProjects(data.projects || []));
+            .then(data => setProjects(data || []));
     }, []);
 
     const deleteProject = async (name) => {
