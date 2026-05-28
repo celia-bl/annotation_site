@@ -485,13 +485,6 @@ def get_projects():
     return load_projects()
 
 
-@app.post("/projects")
-def create_project(project: dict):
-    projects = load_projects()
-    project["annotators"] = []
-    projects.append(project)
-    save_projects(projects)
-    return {"status": "ok"}
 
 @app.delete("/projects")
 def delete_project(name: str):

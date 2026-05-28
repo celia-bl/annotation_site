@@ -4,6 +4,7 @@ import { useAppContext } from "../context/AppContext";
 const API = "http://localhost:8000";
 
 export default function Setup({ project, onBack }) {
+    if (!project) return <div>Chargement...</div>;
     const { setAnnotator, setImages, setLabelsMap, setCsvPath, setStep, setProjectName } = useAppContext();
 
     const [annotators, setAnnotators] = useState([]);

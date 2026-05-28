@@ -214,7 +214,7 @@ function SiteEditor({ site, availableFolders, onChange, onRemove }) {
 }
 
 // ── Main Component ────────────────────────────────────────────────────────────
-export default function CreateProject({ onCreate }) {
+export default function CreateProject({ onCreated, onBack }) {
     const [name, setName] = useState("");
     const [rootFolder, setRootFolder] = useState("");
     const [availableFolders, setAvailableFolders] = useState([]);
@@ -302,9 +302,10 @@ export default function CreateProject({ onCreate }) {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
         });
+        console.log('res', res)
         const data = await res.json();
         if (data.error) { setError(data.error); return; }
-        onCreate(data.project);
+        onCreated(data.project);
     };
 
     return (

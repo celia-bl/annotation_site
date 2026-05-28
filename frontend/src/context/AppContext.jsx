@@ -15,6 +15,9 @@ export function AppProvider({ children }) {
         in_sampling: "Point-based",
         n_points: 10,
     });
+    const [view, setView] = useState("list"); // "list" | "create" | "setup"
+    const [selectedProject, setSelectedProject] = useState(null);
+
 
     const [currentImageIdx, setCurrentImageIdx] = useState(0);
     const [userClickedImage, setUserClickedImage] = useState(false);
@@ -62,6 +65,8 @@ export function AppProvider({ children }) {
                 config, setConfig,
                 currentImageIdx, setCurrentImageIdx,
                 userClickedImage, setUserClickedImage,
+                view, setView,
+                selectedProject, setSelectedProject,
 
                 // annotation
                 points, setPoints,
