@@ -1,7 +1,6 @@
 @echo off
 echo Download Github modifs
-git fetch origin
-git reset --hard origin/master
+git pull https://github.com/celia-bl/annotation_site.git
 echo App Launching
 call annotation-venv\Scripts\activate
 start "Backend" cmd /k "cd backend && uvicorn main:app --reload"
