@@ -5,8 +5,8 @@ import numpy as np
 import cv2
 from util.coco import decode_rle_mask
 from segment_anything.utils.transforms import ResizeLongestSide
-from sam3.model_builder import build_sam3_image_model
-from sam3.model.sam3_image_processor import Sam3Processor
+#from sam3.model_builder import build_sam3_image_model
+#from sam3.model.sam3_image_processor import Sam3Processor
 
 class BaseSegmentationModel:
     def generate(self, image: np.ndarray) -> list:

@@ -124,3 +124,10 @@ uvicorn==0.42.0
 wandb==0.25.1
 watchdog==6.0.0
 wcwidth==0.6.0
+fastapi==0.135.1
+torch==2.11.0
+torchvision
+segment-anything
+pycocotools
+sam3 clone dans backend
+einops
