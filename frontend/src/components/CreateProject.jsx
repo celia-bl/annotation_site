@@ -225,28 +225,38 @@ export default function CreateProject({ onCreated, onBack }) {
     const [loadingFolders, setLoadingFolders] = useState(false);
     const [preview, setPreview] = useState(null); // { count, transects }
     const [error, setError] = useState("");
+    const [fallbackMode, setFallbackMode] = useState(false);
 
-    const selectRootFolder = async (path) => {
-        setRootFolder(path);
-        setLoadingFolders(true);
-        setSites([]);
-        setPreview(null);
-        const res = await fetch(`${API}/browse?path=${encodeURIComponent(path)}`);
-        const data = await res.json();
-        setLoadingFolders(false);
-        if (data.error) { setError(data.error); return; }
-        // Filtrer les dossiers qui ont au moins un sous-dossier T*
-        const foldersWithT = [];
-        for (const dir of data.dirs) {
-            const fullPath = path.replace(/\/$/, "") + "/" + dir;
-            const sub = await fetch(`${API}/browse?path=${encodeURIComponent(fullPath)}`);
-            const subData = await sub.json();
-            const hasT = subData.dirs?.some(d => d.toUpperCase().startsWith("T"));
-            if (hasT) foldersWithT.push(fullPath);
-        }
-        setAvailableFolders(foldersWithT);
-        setError("");
-    };
+const selectRootFolder = async (path) => {
+    setRootFolder(path);
+    setLoadingFolders(true);
+    setSites([]);
+    setPreview(null);
+    const res = await fetch(`${API}/browse?path=${encodeURIComponent(path)}`);
+    const data = await res.json();
+    if (data.error) { setError(data.error); setLoadingFolders(false); return; }
+
+    // Cherche les dossiers avec T*
+    const foldersWithT = [];
+    const allSubFolders = [];
+    for (const dir of data.dirs) {
+        const fullPath = path.replace(/\/$/, "") + "/" + dir;
+        allSubFolders.push(fullPath);
+        const sub = await fetch(`${API}/browse?path=${encodeURIComponent(fullPath)}`);
+        const subData = await sub.json();
+        const hasT = subData.dirs?.some(d => d.toUpperCase().startsWith("T"));
+        if (hasT) foldersWithT.push(fullPath);
+    }
+
+    // Si des T* trouvés → mode normal, sinon → fallback tous les sous-dossiers
+// Si des T* trouvés → mode normal, sinon → fallback tous les sous-dossiers + root lui-même
+const folders = foldersWithT.length > 0 ? foldersWithT : [path];
+    setAvailableFolders(folders);
+    setFallbackMode(foldersWithT.length === 0); // pour le hint
+    setLoadingFolders(false);
+    setError("");
+};
+
 
     const addSite = () => {
         setSites([...sites, { id: Date.now(), name: `Site ${sites.length + 1}`, folders: [] }]);
@@ -338,14 +348,19 @@ export default function CreateProject({ onCreated, onBack }) {
                         📁 Browse
                     </button>
                 </div>
+
                 {loadingFolders && (
                     <div style={s.hint}>🔍 Scan des sous-dossiers...</div>
                 )}
                 {!loadingFolders && availableFolders.length > 0 && (
-                    <div style={s.hint}>
-                        ✓ {availableFolders.length} dossier(s) avec transects T* détectés
-                    </div>
-                )}
+    <div style={s.hint}>
+        {fallbackMode
+            ? `⚠️ Aucun transect T* détecté — ${availableFolders.length} sous-dossier(s) chargés (mode fallback)`
+            : `✓ ${availableFolders.length} dossier(s) avec transects T* détectés`
+        }
+    </div>
+)}
+
             </div>
 
             {/* Sites */}

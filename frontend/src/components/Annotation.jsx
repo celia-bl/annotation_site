@@ -64,7 +64,6 @@ export default function Annotation() {
         if (hasJumped || !images?.length) return;
 
         const nPoints = config?.n_points ?? 10;
-
         const firstIncompleteIdx = images.findIndex((imageName) => {
             const ann = annotations?.[imageName];
 

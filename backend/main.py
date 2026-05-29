@@ -1,13 +1,21 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-import os
-import csv
 from fastapi import Query
 from fastapi.responses import FileResponse
 from processing_images import generate_masks
 import datetime
-
-
+from pydantic import BaseModel
+from model_training import train_model, create_model
+import torch
+import json
+import numpy as np
+from PIL import Image, ImageOps
+from fastapi import BackgroundTasks
+import random
+from pathlib import Path
+from fastapi import HTTPException
+import csv
+import os
 app = FastAPI()
 
 app.add_middleware(
@@ -17,16 +25,402 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-import torch
+
+# -------GLOBAL VARIABLE ----------
+PROJECTS_FILE = Path("projects.json")
+IMAGE_PATHS_MAP = {}
+_prediction_model   = None   # FeatureExtractorWithHead — None avant 1er training
+_is_training        = False
+_all_annotations    = []     # accumulées depuis le début
+_freq               = 20     # mis à jour par /init-model
+_labels_list        = []     # ["CR", "SND", ...]  (codes courts)
+_labels_names       = []     # ["coral", "sand", ...]  (noms longs pour affichage)
+LABELSET_PATH = None
+_segmentation_cache = {}  # { image_name: masks }
+IMAGE_FOLDER = ""
+ANNOTATIONS_FILE = ""
+
+# -------- PROJECTS -------------------
+@app.post("/projects")
+def create_project(body: dict):
+    projects_file = Path("projects.json")
+    projects = []
+    if projects_file.exists():
+        projects = json.loads(projects_file.read_text())
+    if any(p["name"] == body["name"] for p in projects):
+        return {"error": "Project already exists"}
+    project = {
+        "name": body["name"],
+        "root_folder": body.get("root_folder", ""),
+        "sites": body.get("sites", []),
+        "labels_path": body.get("labels_path", ""),
+        "created_at": str(datetime.datetime.now()),
+    }
+    projects.append(project)
+    projects_file.write_text(json.dumps(projects, indent=2))
+    return {"ok": True, "project": project}
 
 
-# ── imports supplémentaires ────────────────────────────────────────────────────
-import json
-import numpy as np
-from PIL import Image, ImageOps
-from fastapi import BackgroundTasks
 
-import random
+def load_projects():
+    if not PROJECTS_FILE.exists():
+        return []
+    print("tututu", json.loads(PROJECTS_FILE.read_text()))
+    return json.loads(PROJECTS_FILE.read_text())
+
+def save_projects(projects):
+    PROJECTS_FILE.write_text(json.dumps(projects, indent=2))
+
+
+@app.get("/projects")
+def get_projects():
+    return load_projects()
+
+
+
+@app.delete("/projects")
+def delete_project(name: str):
+    projects = load_projects()
+
+    new_projects = [p for p in projects if p["name"] != name]
+
+    if len(new_projects) == len(projects):
+        return {"error": "project not found"}
+
+    save_projects(new_projects)
+    return {"status": "deleted"}
+@app.post("/load-project")
+def load_project(body: dict = None, name: str = Query(default=None)):
+    global IMAGE_FOLDER, LABELSET_PATH
+    global _labels_list, _labels_names
+    global _prediction_model, _all_annotations
+    global ANNOTATIONS_FILE, IMAGE_PATHS_MAP
+
+    # Accepte nom depuis body OU query param
+    if body and "name" in body:
+        name = body["name"]
+    if not name:
+        return {"error": "missing name"}
+
+    projects = load_projects()
+    project = next((p for p in projects if p["name"] == name), None)
+    if project is None:
+        return {"error": "not found"}
+
+    labels_path = project.get("labels_path", project.get("labelsPath", ""))
+    if not labels_path or not os.path.exists(labels_path):
+        return {"error": f"Labels file not found: {labels_path}"}
+
+    LABELSET_PATH = labels_path
+    with open(LABELSET_PATH, encoding="utf-8") as f:
+        labels_map = json.load(f)
+    _labels_list  = list(labels_map.keys())
+    _labels_names = list(labels_map.values())
+
+    _prediction_model = None
+    _all_annotations  = []
+
+    EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp", ".JPG", ".PNG"}
+    IMAGE_PATHS_MAP = {}
+    images = []
+
+    sites = project.get("sites", [])
+    selected_folders = project.get("selectedFolders", [])
+
+    # Construit la liste des dossiers à scanner
+    folders_to_scan = []
+    if sites:
+        for site in sites:
+            for folder_path in site.get("folders", []):
+                folders_to_scan.append(folder_path)
+    elif selected_folders:
+        for folder in selected_folders:
+            folders_to_scan.append(folder.get("path", folder) if isinstance(folder, dict) else folder)
+    else:
+        # Ancien système
+        image_path = project.get("imagePath", project.get("image_path", ""))
+        if image_path:
+            folders_to_scan.append(image_path)
+
+    if not folders_to_scan:
+        return {"error": "No image folders found in project"}
+
+    for folder_path in folders_to_scan:
+        p = Path(folder_path)
+        if not p.exists():
+            continue
+        transect_dirs = sorted([d for d in p.iterdir() if d.is_dir() and d.name.upper().startswith("T")])
+        if transect_dirs:
+            for t_dir in transect_dirs:
+                for f in sorted(t_dir.iterdir()):
+                    if f.suffix.lower() in {e.lower() for e in EXTENSIONS}:
+                        IMAGE_PATHS_MAP[f.name] = str(f)
+                        images.append({"filename": f.name, "path": str(f), "folder": p.name, "transect": t_dir.name})
+        else:
+            for f in sorted(p.rglob("*")):
+                if f.is_file() and f.suffix.lower() in {e.lower() for e in EXTENSIONS}:
+                    IMAGE_PATHS_MAP[f.name] = str(f)
+                    images.append({"filename": f.name, "path": str(f), "folder": p.name})
+
+    IMAGE_FOLDER = folders_to_scan[0]
+
+    annotations_dir = os.path.join(IMAGE_FOLDER, "annotations")
+    os.makedirs(annotations_dir, exist_ok=True)
+    ANNOTATIONS_FILE = os.path.join(annotations_dir, f"annotations_{name}.csv")
+
+    app.state.images = images
+
+    return {
+        "status": "ok",
+        "project": project,
+        "images": images,
+        "n_labels": len(_labels_list)
+    }
+
+
+# -------- FOLDER --------------------
+@app.get("/read-csv")
+def read_csv(path: str = Query(...)):
+    if not os.path.exists(path):
+        return {"error": "File not found"}
+
+    if not path.endswith(".csv"):
+        return {"error": "Not a CSV"}
+
+    rows = []
+
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            rows.append(row)
+
+    return {"rows": rows}
+
+# 🔥 changer dynamiquement le dossier
+@app.post("/set-folder")
+def set_folder(path: str):
+    global IMAGE_FOLDER
+
+    if not os.path.exists(path):
+        return {"error": "Folder not found"}
+
+    IMAGE_FOLDER = path
+    return {"status": "ok", "path": IMAGE_FOLDER}
+
+@app.get("/browse")
+def browse(path: str):
+    p = Path(path)
+    if not p.exists() or not p.is_dir():
+        return {"error": "Invalid path"}
+    dirs = sorted([d.name for d in p.iterdir() if d.is_dir()])
+    return {"path": str(p), "dirs": dirs}
+
+
+@app.get("/browse-files")
+def browse_files(path: str):
+    p = Path(path)
+    if not p.exists() or not p.is_dir():
+        return {"error": "Invalid path"}
+    dirs = sorted([d.name for d in p.iterdir() if d.is_dir()])
+    files = sorted([f.name for f in p.iterdir() if f.suffix == ".json"])
+    return {"path": str(p), "dirs": dirs, "files": files}
+
+
+@app.get("/scan-transects")
+def scan_transects(folder: str, pattern: str = "T"):
+    p = Path(folder)
+    if not p.exists() or not p.is_dir():
+        return {"error": "Invalid path"}
+
+    EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp", ".JPG", ".PNG"}
+    results = []
+
+    transect_dirs = sorted([
+        d for d in p.iterdir()
+        if d.is_dir() and d.name.upper().startswith(pattern.upper())
+    ])
+
+    if transect_dirs:
+        # Mode normal : T* uniquement
+        for t_dir in transect_dirs:
+            for f in sorted(t_dir.iterdir()):
+                if f.suffix.lower() in EXTENSIONS:
+                    results.append({
+                        "filename": f.name,
+                        "path": str(f),
+                        "transect": t_dir.name,
+                        "folder": str(p),
+                        "folder_name": p.name,
+                    })
+    else:
+        # Mode fallback : images directement dans le dossier + tous les sous-dossiers
+        for f in sorted(p.rglob("*")):
+            if f.is_file() and f.suffix.lower() in EXTENSIONS:
+                # transect = nom du sous-dossier direct, ou "." si à la racine
+                rel = f.relative_to(p)
+                transect = rel.parts[0] if len(rel.parts) > 1 else "."
+                results.append({
+                    "filename": f.name,
+                    "path": str(f),
+                    "transect": transect,
+                    "folder": str(p),
+                    "folder_name": p.name,
+                })
+
+    return {"images": results, "count": len(results)}
+
+@app.get("/browse-subfolders")
+def browse_subfolders(path: str):
+    """Liste les sous-dossiers directs d'un dossier racine"""
+    p = Path(path)
+    if not p.exists() or not p.is_dir():
+        return {"error": "Invalid path"}
+
+    subfolders = []
+    for child in sorted(p.iterdir()):
+        if child.is_dir():
+            # Compte les images dans ce sous-dossier
+            img_count = len([
+                f for f in child.iterdir()
+                if f.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
+            ])
+            subfolders.append({
+                "name": child.name,
+                "path": str(child),
+                "imageCount": img_count
+            })
+
+    return {"path": str(p), "subfolders": subfolders}
+
+
+
+
+# --------- LABELS --------------------
+@app.get("/load-labels-json")
+def load_labels_json(path: str):
+    with open(path, "r") as f:
+        return json.load(f)
+
+
+@app.post("/set-labelset")
+def set_labelset(path: str):
+    global LABELSET_PATH
+
+    if not os.path.exists(path):
+        return {"error": "not found"}
+
+    LABELSET_PATH = path
+    return {"status": "ok"}
+# 🔥 labels
+@app.get("/labels")
+def get_labels():
+    if LABELSET_PATH and os.path.exists(LABELSET_PATH):
+        with open(LABELSET_PATH, newline="", encoding="utf-8") as f:
+            return [row[0] for row in csv.reader(f) if row]
+
+    return ["coral", "sand", "algae"]
+
+@app.get("/load-labels")
+def load_labels(path: str = Query(...)):
+    if not os.path.exists(path):
+        return []
+
+    labels = []
+
+    with open(path, newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if len(row) > 0:
+                labels.append(row[0])  # ⚠️ adapte la colonne si besoin
+
+    return labels
+
+
+# --------- IMAGE -----------------------
+@app.get("/image/{image_name}")
+def get_image(image_name: str):
+    # D'abord chercher dans la map (nouveau système)
+    if image_name in IMAGE_PATHS_MAP:
+        return FileResponse(IMAGE_PATHS_MAP[image_name])
+    # Fallback ancien système
+    path = os.path.join(IMAGE_FOLDER, image_name)
+    if os.path.exists(path):
+        return FileResponse(path)
+    raise HTTPException(status_code=404, detail=f"Image not found: {image_name}")
+@app.get("/images")
+def get_images():
+    # Nouveau système : utiliser la map
+    if IMAGE_PATHS_MAP:
+        return list(IMAGE_PATHS_MAP.keys())
+    # Ancien système fallback
+    if not IMAGE_FOLDER or not os.path.exists(IMAGE_FOLDER):
+        return []
+    return [
+        f for f in os.listdir(IMAGE_FOLDER)
+        if f.lower().endswith(("png", "jpg", "jpeg"))
+    ]
+
+
+
+@app.post("/images-from-folders")
+def images_from_folders(body: dict):
+    """Charge les images depuis une liste de dossiers sélectionnés"""
+    folders = body.get("folders", [])  # liste de paths absolus
+
+    EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
+    images = []
+
+    for folder_path in folders:
+        p = Path(folder_path)
+        if p.exists() and p.is_dir():
+            for f in sorted(p.iterdir()):
+                if f.suffix.lower() in EXTENSIONS:
+                    images.append({
+                        "filename": f.name,
+                        "path": str(f),
+                        "folder": p.name  # pour savoir d'où vient l'image
+                    })
+
+    # Stocke dans le state global
+    app.state.images = images
+    return images
+
+# ------------- ANNOTATORS ---------------
+@app.get("/annotators")
+def get_annotators(project_name: str):
+    projects = load_projects()
+
+    for p in projects:
+        if p["name"] == project_name:
+            return p.get("annotators", [])
+
+    return []
+
+@app.post("/annotators")
+def create_annotator(body: dict):
+    project_name = body.get("project")
+    annotator_id = body.get("annotator_id")
+
+    if not project_name or not annotator_id:
+        return {"error": "missing fields"}
+
+    projects = load_projects()
+
+    for p in projects:
+        if p["name"] == project_name:
+            if "annotators" not in p:
+                p["annotators"] = []
+
+            if annotator_id in p["annotators"]:
+                return {"status": "exists"}
+
+            p["annotators"].append(annotator_id)
+            save_projects(projects)
+
+            return {"status": "created", "annotator_id": annotator_id}
+
+    return {"error": "project not found"}
+
 
 def generate_points(n, width, height):
     return [
@@ -37,16 +431,6 @@ def generate_points(n, width, height):
         }
         for i in range(n)
     ]
-# ── état global du modèle ──────────────────────────────────────────────────────
-
-_prediction_model   = None   # FeatureExtractorWithHead — None avant 1er training
-_is_training        = False
-_all_annotations    = []     # accumulées depuis le début
-_freq               = 20     # mis à jour par /init-model
-_labels_list        = []     # ["CR", "SND", ...]  (codes courts)
-_labels_names       = []     # ["coral", "sand", ...]  (noms longs pour affichage)
-LABELSET_PATH = None
-_segmentation_cache = {}  # { image_name: masks }
 
 # ── /init-model ───────────────────────────────────────────────────────────────
 
@@ -84,7 +468,6 @@ def init_model(model_name: str = Query(...), frequency: int = Query(20)):
 
 # ── /predict ──────────────────────────────────────────────────────────────────
 
-from pydantic import BaseModel
 
 class PredictRequest(BaseModel):
     name: str
@@ -201,32 +584,6 @@ def get_annotations(name: str, project: str):
     return {"points": points}
 
 
-# 🆕 AJOUT: Variable globale ANNOTATIONS_FILE au début du fichier
-# À ajouter avec les autres variables globales (après _segmentation_cache)
-"""
-ANNOTATIONS_FILE = None  # Défini lors du /load-project
-"""
-
-# 🆕 MODIFICATION: Update load_project to set ANNOTATIONS_FILE
-# Remplace la section "5. set annotation_file for project" dans load_project par:
-"""
-    # 5. set annotation_file for project
-    annotations_dir = os.path.join(image_path, "annotations")
-    os.makedirs(annotations_dir, exist_ok=True)
-
-    ANNOTATIONS_FILE = os.path.join(
-        annotations_dir,
-        f"annotations_{name}.csv"
-    )
-    print(f"📝 ANNOTATIONS_FILE set to: {ANNOTATIONS_FILE}")
-    return {
-        "status": "ok",
-        "project": project,
-        "n_labels": len(_labels_list),
-        "annotations_file": ANNOTATIONS_FILE  # 🆕 Retourner aussi le chemin pour info
-    }
-"""
-
 
 class Annotation(BaseModel):
     image: str
@@ -340,7 +697,6 @@ def _crop_patch(image_np: np.ndarray, row: int, col: int, size: int = 224) -> Im
 def _run_training():
     """Tâche de fond : entraîne le MLP sur toutes les annotations accumulées."""
     global _prediction_model, _is_training
-    from model_training import train_model, create_model
 
     print(f"[Training] Starting on {len(_all_annotations)} annotations...")
     try:
@@ -357,61 +713,6 @@ def _run_training():
         print(f"[Training] Error: {e}")
     finally:
         _is_training = False
-
-@app.get("/read-csv")
-def read_csv(path: str = Query(...)):
-    if not os.path.exists(path):
-        return {"error": "File not found"}
-
-    if not path.endswith(".csv"):
-        return {"error": "Not a CSV"}
-
-    rows = []
-
-    with open(path, newline="", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        for row in reader:
-            rows.append(row)
-
-    return {"rows": rows}
-
-@app.get("/load-labels")
-def load_labels(path: str = Query(...)):
-    if not os.path.exists(path):
-        return []
-
-    labels = []
-
-    with open(path, newline="", encoding="utf-8") as f:
-        reader = csv.reader(f)
-        for row in reader:
-            if len(row) > 0:
-                labels.append(row[0])  # ⚠️ adapte la colonne si besoin
-
-    return labels
-# 🔥 récupérer images du dossier courant
-@app.get("/images")
-def get_images():
-    if not os.path.exists(IMAGE_FOLDER):
-        return []
-
-    return [
-        f for f in os.listdir(IMAGE_FOLDER)
-        if f.lower().endswith(("png", "jpg", "jpeg"))
-    ]
-
-
-# 🔥 changer dynamiquement le dossier
-@app.post("/set-folder")
-def set_folder(path: str):
-    global IMAGE_FOLDER
-
-    if not os.path.exists(path):
-        return {"error": "Folder not found"}
-
-    IMAGE_FOLDER = path
-    return {"status": "ok", "path": IMAGE_FOLDER}
-
 
 @app.get("/masks")
 def get_masks(
@@ -436,159 +737,6 @@ def get_masks(
     _segmentation_cache[name] = masks
 
     return {"masks": masks}
-@app.get("/load-labels-json")
-def load_labels_json(path: str):
-    import json
-    with open(path, "r") as f:
-        return json.load(f)
-
-@app.get("/image/{image_name}")
-def get_image(image_name: str):
-    path = os.path.join(IMAGE_FOLDER, image_name)
-    return FileResponse(path)
-
-
-@app.post("/set-labelset")
-def set_labelset(path: str):
-    global LABELSET_PATH
-
-    if not os.path.exists(path):
-        return {"error": "not found"}
-
-    LABELSET_PATH = path
-    return {"status": "ok"}
-# 🔥 labels
-@app.get("/labels")
-def get_labels():
-    if LABELSET_PATH and os.path.exists(LABELSET_PATH):
-        with open(LABELSET_PATH, newline="", encoding="utf-8") as f:
-            return [row[0] for row in csv.reader(f) if row]
-
-    return ["coral", "sand", "algae"]
-
-import json
-from pathlib import Path
-
-PROJECTS_FILE = Path("projects.json")
-
-def load_projects():
-    if not PROJECTS_FILE.exists():
-        return []
-    print("tututu", json.loads(PROJECTS_FILE.read_text()))
-    return json.loads(PROJECTS_FILE.read_text())
-
-def save_projects(projects):
-    PROJECTS_FILE.write_text(json.dumps(projects, indent=2))
-
-
-@app.get("/projects")
-def get_projects():
-    return load_projects()
-
-
-
-@app.delete("/projects")
-def delete_project(name: str):
-    projects = load_projects()
-
-    new_projects = [p for p in projects if p["name"] != name]
-
-    if len(new_projects) == len(projects):
-        return {"error": "project not found"}
-
-    save_projects(new_projects)
-    return {"status": "deleted"}
-
-
-@app.post("/load-project")
-def load_project(name: str):
-    global IMAGE_FOLDER, LABELSET_PATH
-    global _labels_list, _labels_names
-    global _prediction_model, _all_annotations
-    global ANNOTATIONS_FILE
-
-
-    projects = load_projects()
-
-    project = next((p for p in projects if p["name"] == name), None)
-    if project is None:
-        return {"error": "not found"}
-
-    image_path  = project["imagePath"]
-    labels_path = project["labelsPath"]
-    print("IMAGE PATH", image_path)
-    print("LABELS PATH", labels_path)
-    if not os.path.exists(image_path):
-        return {"error": f"Image folder not found: {image_path}"}
-
-    if not os.path.exists(labels_path):
-        return {"error": f"Labels file not found: {labels_path}"}
-
-    # 🔥 1. set folder
-    IMAGE_FOLDER = image_path
-
-    # 🔥 2. set labelset
-    LABELSET_PATH = labels_path
-
-    # 🔥 3. charger labels
-    with open(LABELSET_PATH, encoding="utf-8") as f:
-        labels_map = json.load(f)
-
-    _labels_list  = list(labels_map.keys())
-    _labels_names = list(labels_map.values())
-
-    # 🔥 4. reset session (IMPORTANT)
-    _prediction_model = None
-    _all_annotations  = []
-
-    #5. set annotation_file for project
-    annotations_dir = os.path.join(image_path, "annotations")
-    os.makedirs(annotations_dir, exist_ok=True)
-
-    ANNOTATIONS_FILE = os.path.join(
-        annotations_dir,
-        f"annotations_{name}.csv"
-    )
-    return {
-        "status": "ok",
-        "project": project,
-        "n_labels": len(_labels_list)
-    }
-
-@app.get("/annotators")
-def get_annotators(project_name: str):
-    projects = load_projects()
-
-    for p in projects:
-        if p["name"] == project_name:
-            return p.get("annotators", [])
-
-    return []
-
-@app.post("/annotators")
-def create_annotator(body: dict):
-    project_name = body.get("project")
-    annotator_id = body.get("annotator_id")
-
-    if not project_name or not annotator_id:
-        return {"error": "missing fields"}
-
-    projects = load_projects()
-
-    for p in projects:
-        if p["name"] == project_name:
-            if "annotators" not in p:
-                p["annotators"] = []
-
-            if annotator_id in p["annotators"]:
-                return {"status": "exists"}
-
-            p["annotators"].append(annotator_id)
-            save_projects(projects)
-
-            return {"status": "created", "annotator_id": annotator_id}
-
-    return {"error": "project not found"}
 @app.post("/precompute-segmentation")
 def precompute_segmentation(batch_size: int = 10, model: str = "sam"):
     global _segmentation_cache
@@ -756,9 +904,7 @@ def save_annotations(body: dict):
         "should_train": should_train,
     }
 
-from fastapi import HTTPException
-import csv
-import os
+
 @app.get("/get-roi")
 def get_roi(image_name: str):
     if not os.path.exists(TIMINGS_CSV):
@@ -853,149 +999,4 @@ def get_all_annotations():
         print(f"❌ Erreur lecture CSV: {e}")
 
     return result
-
-
-# main.py
-
-@app.get("/browse-subfolders")
-def browse_subfolders(path: str):
-    """Liste les sous-dossiers directs d'un dossier racine"""
-    p = Path(path)
-    if not p.exists() or not p.is_dir():
-        return {"error": "Invalid path"}
-
-    subfolders = []
-    for child in sorted(p.iterdir()):
-        if child.is_dir():
-            # Compte les images dans ce sous-dossier
-            img_count = len([
-                f for f in child.iterdir()
-                if f.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
-            ])
-            subfolders.append({
-                "name": child.name,
-                "path": str(child),
-                "imageCount": img_count
-            })
-
-    return {"path": str(p), "subfolders": subfolders}
-
-
-@app.post("/images-from-folders")
-def images_from_folders(body: dict):
-    """Charge les images depuis une liste de dossiers sélectionnés"""
-    folders = body.get("folders", [])  # liste de paths absolus
-
-    EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
-    images = []
-
-    for folder_path in folders:
-        p = Path(folder_path)
-        if p.exists() and p.is_dir():
-            for f in sorted(p.iterdir()):
-                if f.suffix.lower() in EXTENSIONS:
-                    images.append({
-                        "filename": f.name,
-                        "path": str(f),
-                        "folder": p.name  # pour savoir d'où vient l'image
-                    })
-
-    # Stocke dans le state global
-    app.state.images = images
-    return images
-
-
-@app.post("/load-project")
-def load_project(body: dict):
-    name = body["name"]
-    projects = load_projects()
-
-    if name not in projects:
-        return {"error": "Project not found"}
-
-    project = projects[name]
-
-    # Recharge les images depuis les dossiers sélectionnés
-    EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
-    images = []
-
-    for folder in project.get("selectedFolders", []):
-        p = Path(folder["path"])
-        if p.exists():
-            for f in sorted(p.iterdir()):
-                if f.suffix.lower() in EXTENSIONS:
-                    images.append({
-                        "filename": f.name,
-                        "path": str(f),
-                        "folder": p.name
-                    })
-
-    app.state.images = images
-    return {"project": project, "images": images}
-
-
-# main.py — ajouter ces routes
-@app.get("/browse")
-def browse(path: str):
-    p = Path(path)
-    if not p.exists() or not p.is_dir():
-        return {"error": "Invalid path"}
-    dirs = sorted([d.name for d in p.iterdir() if d.is_dir()])
-    return {"path": str(p), "dirs": dirs}
-
-
-@app.get("/browse-files")
-def browse_files(path: str):
-    p = Path(path)
-    if not p.exists() or not p.is_dir():
-        return {"error": "Invalid path"}
-    dirs = sorted([d.name for d in p.iterdir() if d.is_dir()])
-    files = sorted([f.name for f in p.iterdir() if f.suffix == ".json"])
-    return {"path": str(p), "dirs": dirs, "files": files}
-
-
-@app.get("/scan-transects")
-def scan_transects(folder: str, pattern: str = "T"):
-    p = Path(folder)
-    if not p.exists() or not p.is_dir():
-        return {"error": "Invalid path"}
-    EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".webp"}
-    results = []
-    transect_dirs = sorted([
-        d for d in p.iterdir()
-        if d.is_dir() and d.name.upper().startswith(pattern.upper())
-    ])
-    for t_dir in transect_dirs:
-        for f in sorted(t_dir.iterdir()):
-            if f.suffix.lower() in EXTENSIONS:
-                results.append({
-                    "filename": f.name,
-                    "path": str(f),
-                    "transect": t_dir.name,
-                    "folder": str(p),
-                    "folder_name": p.name,
-                })
-    return {"images": results, "count": len(results)}
-
-
-@app.post("/projects")
-def create_project(body: dict):
-    projects_file = Path("projects.json")
-    projects = []
-    if projects_file.exists():
-        projects = json.loads(projects_file.read_text())
-    if any(p["name"] == body["name"] for p in projects):
-        return {"error": "Project already exists"}
-    import datetime
-    project = {
-        "name": body["name"],
-        "root_folder": body.get("root_folder", ""),
-        "sites": body.get("sites", []),
-        "labels_path": body.get("labels_path", ""),
-        "created_at": str(datetime.datetime.now()),
-    }
-    projects.append(project)
-    projects_file.write_text(json.dumps(projects, indent=2))
-    return {"ok": True, "project": project}
-
 
