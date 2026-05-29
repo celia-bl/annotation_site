@@ -158,14 +158,24 @@ export default function Annotation() {
             </div>
 
             {/* ── MAIN CONTENT ── */}
-            {showGallery ? (
-                <Gallery setShowGallery={setShowGallery}/>
-            ) : (
-                <div style={{ display: "flex", gap: "20px" }}>
-                    <ImageCanvas />
-                    <ControlPanel />
-                </div>
-            )}
+{showGallery ? (
+    <Gallery setShowGallery={setShowGallery}/>
+) : (
+    <div style={{
+        display: "flex",
+        gap: "20px",
+        width: "100%",
+        alignItems: "flex-start"
+    }}>
+        <div style={{ flex: "0 0 65%", minWidth: 0 }}>
+            <ImageCanvas />
+        </div>
+        <div style={{ flex: "0 0 calc(25%)", minWidth: 0 }}>
+            <ControlPanel />
+        </div>
+    </div>
+)}
+
 
             {/* ── CONFIG POPUP ── */}
             {showConfigPopup && (
