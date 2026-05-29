@@ -65,7 +65,6 @@ nvidia-nvshmem-cu13==3.4.5
 nvidia-nvtx==13.0.85
 open_clip_torch==3.3.0
 opencv-python-headless==4.8.1.78
-packaging @ file:///home/task_176104885106445/conda-bld/packaging_1761049078006/work
 pandas==2.3.3
 pillow==12.1.1
 platformdirs==4.9.4
@@ -95,7 +94,6 @@ requests==2.32.5
 rich==14.3.3
 rpds-py==0.30.0
 safetensors==0.7.0
-sam3 @ file:///home/Celia/Documents/annotation_framework/backend/sam3
 scikit-learn==1.8.0
 scipy==1.17.1
 segment_anything @ git+https://github.com/facebookresearch/segment-anything.git@dca509fe793f601edb92606367a655c15ac00fdf
@@ -129,5 +127,4 @@ torch==2.11.0
 torchvision
 segment-anything
 pycocotools
-sam3 clone dans backend
-einops
+
